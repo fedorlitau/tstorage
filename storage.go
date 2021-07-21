@@ -151,6 +151,15 @@ func WithLogger(logger Logger) Option {
 	}
 }
 
+// WithWAL enables Write Ahead Log to offer durability guarantees.
+//
+// Defaults to false.
+func WithWAL(enableWAL bool) Option {
+	return func(s *storage) {
+		s.enableWAL = enableWAL
+	}
+}
+
 // NewStorage gives back a new storage, which stores time-series data in the process memory by default.
 //
 // Give the WithDataPath option for running as a on-disk storage. Specify a directory with data already exists,
@@ -182,23 +191,27 @@ func NewStorage(opts ...Option) (Storage, error) {
 	}
 
 	if s.inMemoryMode() {
-		s.partitionList.insert(newMemoryPartition(s.wal, s.partitionDuration, s.timestampPrecision))
+		s.partitionList.insert(newMemoryPartition(nil, s.partitionDuration, s.timestampPrecision))
 		return s, nil
 	}
 
-	walPath := filepath.Join(s.dataPath, "wal")
-	if info, err := os.Stat(walPath); !os.IsNotExist(err) && !info.IsDir() {
-		// TODO: Start WAL recovery, which means to create a new memoryPartition based on WAL entries
+	// Start WAL recovery
+	if s.enableWAL {
+		walPath := filepath.Join(s.dataPath, "wal")
+		info, err := os.Stat(walPath)
+		if !os.IsNotExist(err) && !info.IsDir() {
+			// TODO: Start WAL recovery, which means to create a new memoryPartition based on WAL entries
+		}
+
+		if err := os.MkdirAll(s.dataPath, fs.ModePerm); err != nil {
+			return nil, fmt.Errorf("failed to make data directory %s: %w", s.dataPath, err)
+		}
+		s.wal, err = newFileWal(walPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	if err := os.MkdirAll(s.dataPath, fs.ModePerm); err != nil {
-		return nil, fmt.Errorf("failed to make data directory %s: %w", s.dataPath, err)
-	}
-	w, err := newFileWal(walPath)
-	if err != nil {
-		return nil, err
-	}
-	s.wal = w
 	entries, err := os.ReadDir(s.dataPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open data directory: %w", err)
@@ -257,6 +270,7 @@ func NewStorage(opts ...Option) (Storage, error) {
 type storage struct {
 	partitionList partitionList
 
+	enableWAL          bool
 	wal                wal
 	partitionDuration  time.Duration
 	retention          time.Duration
